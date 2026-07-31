@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # setup-node reads the `nodejs` entry out of .tool-versions, so the
       # Node.js version stays pinned in a single file (asdf consumes it
