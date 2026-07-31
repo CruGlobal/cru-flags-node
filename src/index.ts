@@ -16,7 +16,7 @@
 
 import { CruFlags } from "./client.js";
 
-export { CruFlags, URL_ENV_VAR } from "./client.js";
+export { CruFlags, REFRESH_MODE_ENV_VAR, URL_ENV_VAR } from "./client.js";
 export { FlagsError } from "./errors.js";
 export type { FlagsErrorCode } from "./errors.js";
 export type {
@@ -25,6 +25,8 @@ export type {
   FlagsDocument,
   FlagsErrorHandler,
   FlagsHealthEvent,
+  RefreshMode,
+  RefreshOptions,
 } from "./types.js";
 
 /**
