@@ -29,7 +29,7 @@ jobs:
       # locally, setup-node consumes it in CI). No separate Node pin in
       # the workflow — that way the local and CI versions cannot drift.
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version-file: .tool-versions
           cache: npm
