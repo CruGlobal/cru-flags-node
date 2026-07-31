@@ -1,0 +1,75 @@
+{
+  "name": "@cruglobal/flags",
+  "version": "0.1.0",
+  "description": "Official Node.js client for Cru's pipeline feature flag service. Zero dependencies, synchronous flag reads, fail-static polling with ETag revalidation.",
+  "keywords": [
+    "feature-flags",
+    "feature-toggles",
+    "flags",
+    "cru",
+    "etag",
+    "polling"
+  ],
+  "homepage": "https://github.com/CruGlobal/cru-flags-node#readme",
+  "bugs": {
+    "url": "https://github.com/CruGlobal/cru-flags-node/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CruGlobal/cru-flags-node.git"
+  },
+  "license": "BSD-3-Clause",
+  "author": "Cru",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "verify:live": "CRU_FLAGS_LIVE=1 vitest run --reporter=verbose test/live.test.ts",
+    "prepublishOnly": "npm run typecheck && npm run lint && npm test && npm run build"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org",
+    "access": "public"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^25.6.0",
+    "@vitest/coverage-v8": "^4.0.0",
+    "eslint": "^10.0.0",
+    "eslint-config-prettier": "^10.0.0",
+    "prettier": "^3.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^6.0.0",
+    "typescript-eslint": "^8.0.0",
+    "vitest": "^4.0.0"
+  }
+}

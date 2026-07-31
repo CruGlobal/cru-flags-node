@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────
+  # Primary (and only) job: typecheck + lint + tests + build under Node
+  # (pinned via .tool-versions). This job's name is the repository's
+  # required status check — renaming it breaks the ruleset.
+  #
+  # Note: the test suite never talks to the real flag service. The live
+  # verification test is gated on CRU_FLAGS_LIVE and stays skipped here on
+  # purpose — a red build must mean "our code is broken", not "a service
+  # was restarting". Run it locally with `npm run verify:live`.
+  # ────────────────────────────────────────────────────────────────────────
+  node:
+    name: node (typecheck + lint + test + build)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # setup-node reads the `nodejs` entry out of .tool-versions, so the
+      # Node.js version stays pinned in a single file (asdf consumes it
+      # locally, setup-node consumes it in CI). No separate Node pin in
+      # the workflow — that way the local and CI versions cannot drift.
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .tool-versions
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build

@@ -1,0 +1,32 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "exactOptionalPropertyTypes": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "isolatedModules": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "verbatimModuleSyntax": true,
+    // tsup's internal DTS builder (rollup-plugin-dts) still sets
+    // `baseUrl: "."` unconditionally, which TypeScript 6 flags as
+    // deprecated. Silence the diagnostic until tsup updates; we don't
+    // rely on baseUrl ourselves. Remove once upstream is fixed.
+    "ignoreDeprecations": "6.0",
+    "outDir": "dist",
+    "rootDir": ".",
+    "types": ["vitest/globals", "node"]
+  },
+  "include": ["src/**/*", "test/**/*", "*.config.ts", "eslint.config.js"],
+  "exclude": ["node_modules", "dist", "coverage"]
+}

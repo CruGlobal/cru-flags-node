@@ -1,0 +1,46 @@
+version: 2
+
+updates:
+  # ──────────────────────────────────────────────────────────────────────────
+  # npm dev-dependencies. The library has zero runtime deps, so every
+  # package-lock entry is a dev-only update; we group minor and patch
+  # bumps into a single weekly PR to keep review cost flat. Major
+  # version bumps are intentionally left ungrouped so each one gets its
+  # own PR and a proper migration check.
+  # ──────────────────────────────────────────────────────────────────────────
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      npm-dev-dependencies:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # GitHub Actions used by .github/workflows/**. Similar policy: one
+  # batched PR per week for minor + patch bumps; majors remain per-PR
+  # so any breaking change in an action surface surfaces distinctly.
+  # ──────────────────────────────────────────────────────────────────────────
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    commit-message:
+      prefix: "ci"
+      include: "scope"
