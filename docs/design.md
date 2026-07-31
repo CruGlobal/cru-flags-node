@@ -29,6 +29,8 @@ independently of each other.
 
 - Fetching and caching the flag document for a single URL.
 - Background polling with jitter and `ETag` revalidation.
+- An opt-in `refreshMode: "on-demand"` that drops the timer and refreshes on
+  the request path, for runtimes that freeze between requests (§4.8).
 - A synchronous, total `enabled(name)` predicate.
 - `ready()` for runtimes with an init phase (AWS Lambda, container warmup).
 - Fail-static semantics: last-known-good flags survive any outage.
@@ -152,9 +154,10 @@ it does **nothing**: no network, no timers, no env validation. See §4.1.
 ### 3.2 `enabled(name): boolean` and `ready(): Promise<void>`
 
 - `enabled(name)` returns the boolean defined in §2. It is total: it never
-  throws, never rejects, never blocks, and never performs I/O. The first call
-  _starts_ the client (§4.1) but does not wait for it — before the first
-  successful fetch every flag is `false`.
+  throws, never rejects and never blocks. The first call _starts_ the client
+  (§4.1) but does not wait for it — before the first successful fetch every
+  flag is `false`. In background mode it performs no I/O at all; in on-demand
+  mode it may _trigger_ a fetch it does not await (§4.8).
 - `ready()` resolves once the first fetch **attempt** has completed —
   success, 404, or failure alike. It never rejects. It is a warmup hook, not
   a health check: a resolved `ready()` does not promise a document exists.
@@ -179,9 +182,10 @@ export const handler = async (event) => {
 ```ts
 new CruFlags({
   url, // default: process.env.CRU_FLAGS_URL, read at start time
-  pollSeconds = 30, // background poll interval, jittered +/-20%
+  pollSeconds = 30, // refresh interval; background polls are jittered +/-20%
   fetchTimeoutMs = 2000,
   onError, // default: console.warn on health transitions only
+  refreshMode, // default: process.env.CRU_FLAGS_REFRESH_MODE, else "background"
 });
 ```
 
@@ -196,13 +200,20 @@ tool that inspects several projects).
   meaningful: a 200 always installs a **new** frozen object, a 304 keeps the
   **same** one. Tests and the live-verification script use that identity to
   observe revalidation without inspecting HTTP.
-- `close(): void` — cancels the poll timer and stops the client. Optional in
-  long-lived processes (the timer is unref'd; §4.4) but useful in tests and
-  short-lived CLIs.
+- `refresh(options?): Promise<boolean>` — fetch on the caller's turn and
+  resolve to whether the snapshot is fresh (an attempt has completed and the
+  last one succeeded). A no-op while the snapshot is younger than
+  `pollSeconds`, unless `{ force: true }`; concurrent calls, and a concurrent
+  poll tick, share the one in-flight request. Never rejects. It is how
+  on-demand mode is driven when the current document is wanted _before_ the
+  read (§4.8), and an out-of-band poke in background mode.
+- `close(): void` — cancels the poll timer and stops the client, in either
+  mode. Optional in long-lived processes (the timer is unref'd; §4.4) but
+  useful in tests and short-lived CLIs.
 - `FlagsError` — the error passed to `onError`, carrying `code`
   (`"http" | "network" | "timeout" | "parse"`) and, for `"http"`, `status`.
 - Types: `FlagsDocument`, `FlagDefinition`, `CruFlagsOptions`,
-  `FlagsHealthEvent`.
+  `FlagsHealthEvent`, `RefreshMode`, `RefreshOptions`.
 
 Everything else is private. The class uses `#private` fields so there is no
 reachable-but-unsupported surface.
@@ -315,6 +326,53 @@ what `fetch` then rejects with. 2s is chosen against the deployment reality:
 the poll is background work, and a request that hasn't answered in 2s will not
 answer usefully before the next tick anyway.
 
+### 4.8 On-demand refresh (`refreshMode: "on-demand"`)
+
+Everything above describes the default, `refreshMode: "background"`. With
+`refreshMode: "on-demand"` **no poll timer is ever armed**:
+
+- The client still fetches once at start (§4.1), so `await ready()` behaves
+  exactly as it does in background mode.
+- After that, refreshing rides on reads. `enabled()` and `snapshot()` trigger a
+  refresh when the last _attempt_ is `pollSeconds` or older — **without
+  awaiting it**, because a synchronous predicate cannot await, and making it
+  block would be a worse lie than a slightly stale boolean. The read therefore
+  answers from the previous fetch and the next one sees the new document.
+- `await refresh()` is the awaited form, for callers who want the current
+  document _before_ deciding — one line of middleware, and the cost is a
+  conditional GET at most once per `pollSeconds`:
+
+  ```ts
+  app.use(async (_req, _res, next) => {
+    await flags.refresh();
+    next();
+  });
+  ```
+
+- Concurrent refreshes **coalesce** onto the single in-flight request, so a
+  burst of N simultaneous requests is one request to the flag service.
+- Staleness is anchored on the last **attempt**, not the last success. A dead
+  flag service costs one failed request per interval, not one per read, and
+  fail-static (§4.5) is unchanged.
+- There is no jitter, because there is no timer to de-phase: the arrival of
+  real traffic already spreads the fleet out.
+
+Why it exists: a background timer assumes the process keeps running between
+requests. On Cloud Run, or on Lambda outside an invocation, the runtime
+throttles or freezes the instance — the timer either does not fire, or it fires
+only to wake an idle instance up for work nobody asked for, and the "flags are
+always fresh" premise quietly stops holding. Tying the refresh to real traffic
+is both honest and cheap, and it happens exactly when someone wants an answer.
+
+Selecting it: the `refreshMode` option, or `CRU_FLAGS_REFRESH_MODE=on-demand`
+in the environment. The environment variable exists because the 99% path is the
+`flags` singleton, which nobody constructs — a deployment that needs on-demand
+refresh should not have to restructure its code, any more than it hand-codes
+its `CRU_FLAGS_URL`. The option wins over the environment; an unrecognised
+_environment_ value warns once and falls back to background polling, because
+misconfiguration must not stop an app booting, while an unrecognised _option_
+is a TypeScript error at the call site.
+
 ---
 
 ## 5. Error reporting: transitions only
@@ -365,15 +423,18 @@ JSON parses.
 
 Client state:
 
-| Field       | Meaning                                                       |
-| ----------- | ------------------------------------------------------------- |
-| `#document` | Frozen `FlagsDocument` or `null`.                             |
-| `#etag`     | Last `ETag` that accompanied a successfully parsed document.  |
-| `#started`  | Lazy-start latch.                                             |
-| `#healthy`  | Health-transition latch for `onError` (starts `true`).        |
-| `#timer`    | Unref'd poll timer, or `null`.                                |
-| `#closed`   | Terminal; suppresses further polls.                           |
-| `#ready`    | Promise + resolver, resolved after the first attempt settles. |
+| Field            | Meaning                                                         |
+| ---------------- | --------------------------------------------------------------- |
+| `#document`      | Frozen `FlagsDocument` or `null`.                               |
+| `#etag`          | Last `ETag` that accompanied a successfully parsed document.    |
+| `#started`       | Lazy-start latch.                                               |
+| `#healthy`       | Health-transition latch for `onError` (starts `true`).          |
+| `#timer`         | Unref'd poll timer, or `null` (always `null` on-demand).        |
+| `#closed`        | Terminal; suppresses further refreshes.                         |
+| `#ready`         | Promise + resolver, resolved after the first attempt settles.   |
+| `#refreshMode`   | Resolved at start from the option or the environment.           |
+| `#lastAttemptMs` | When the last attempt settled — the staleness anchor (§4.8).    |
+| `#inFlight`      | The request in flight, so concurrent refreshes coalesce (§4.8). |
 
 ### 6.1 Validation rules (`parseDocument`)
 
@@ -411,6 +472,11 @@ The behavioural contract in §2–§5 is written so each bullet maps to a test.
   instead of testing them.
 - **Timers** — real timers for the unref/handle-introspection test; fake
   timers only where the assertion is about scheduling arithmetic.
+- **On-demand** (`test/on-demand.test.ts`) — no timer fires while nobody reads,
+  cache hits inside `pollSeconds`, a refresh once past it, coalescing of
+  concurrent refreshes, one request per interval against a dead service,
+  environment resolution, and that background mode's read path still issues no
+  requests.
 - **Live** (`npm run verify:live`, `test/live.test.ts`) — opt-in, gated on
   `CRU_FLAGS_LIVE=1`, hits `https://deploys.cru.org/flags/ararat/release-candidate`
   (public, read-only) and asserts a real document parses and that the second

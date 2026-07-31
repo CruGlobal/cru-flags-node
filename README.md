@@ -69,8 +69,48 @@ const client = new CruFlags({
   pollSeconds: 30, // background poll interval, jittered ±20%
   fetchTimeoutMs: 2000,
   onError: (event) => log.warn(event), // health transitions only
+  refreshMode: "background", // or "on-demand" — see below
 });
 ```
+
+### On-demand refresh (Cloud Run, Lambda, anything that freezes)
+
+```sh
+CRU_FLAGS_REFRESH_MODE=on-demand
+```
+
+A poll timer assumes the process keeps running between requests. On
+CPU-throttled or scale-to-zero runtimes it either doesn't fire, or it fires only
+to wake an idle instance for work nobody asked for. In `"on-demand"` mode the
+client **arms no timer**: refreshing rides on reads instead, and only once the
+snapshot is `pollSeconds` old.
+
+```ts
+// Either the env var above, or explicitly:
+const flags = new CruFlags({ refreshMode: "on-demand" });
+
+// enabled() stays synchronous. It triggers a refresh when the snapshot is
+// stale, but cannot await one — so it answers from the previous fetch.
+flags.enabled("checkout_v2");
+
+// await refresh() when you want the current document *before* deciding:
+app.use(async (_req, _res, next) => {
+  await flags.refresh(); // no-op while the snapshot is younger than pollSeconds
+  next();
+});
+```
+
+- At most one conditional `GET` per `pollSeconds` per instance — usually a
+  `304`. Reads in between are served from memory.
+- Concurrent refreshes coalesce, so a burst of requests is one request to the
+  flag service.
+- Staleness is measured from the last _attempt_, so a flag service that is down
+  costs one failed request per interval, not one per read.
+- Everything else — fail-static, last-known-good forever, never throwing,
+  transition-only logging — is unchanged.
+
+An explicit `refreshMode` wins over the environment variable; an unrecognised
+env value warns once and keeps polling.
 
 In AWS Lambda, `await flags.ready()` at module scope runs during init, so the
 first invocation already sees real flags instead of `false`:
@@ -91,7 +131,8 @@ Every line here is covered by a test.
 
 - **`enabled(name)` is synchronous, total, and never throws.** Unknown flag,
   no document yet, malformed entry — all `false`. The check is literally
-  `Flags[name]?.Enabled === true`; nothing is coerced.
+  `Flags[name]?.Enabled === true`; nothing is coerced. It performs no I/O in
+  background mode, and never awaits any in `"on-demand"` mode.
 - **`ready()` resolves after the first fetch _attempt_** — success, 404, or
   failure alike — and never rejects. It is a warmup hook, not a health check.
 - **Nothing happens at import.** The first `enabled()` / `ready()` call starts
@@ -108,6 +149,10 @@ Every line here is covered by a test.
   `If-None-Match`; a `304` keeps the existing snapshot (same frozen object).
   The interval is `pollSeconds` ±20% jitter, so a fleet deployed together
   doesn't stampede the service in lockstep.
+- **`refreshMode: "on-demand"` arms no timer** and refreshes on the read path
+  instead, at most once per `pollSeconds`, coalescing concurrent refreshes.
+  `await refresh()` is the awaited form; `refresh({ force: true })` ignores the
+  interval.
 - **The poll timer is `unref()`'d.** The client never keeps a process alive —
   your CLI or test run still exits on its own.
 - **Timeouts via `AbortController`** (`fetchTimeoutMs`, default 2s). No
