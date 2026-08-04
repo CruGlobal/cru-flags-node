@@ -79,11 +79,10 @@ const client = new CruFlags({
 CRU_FLAGS_REFRESH_MODE=on-demand
 ```
 
-A poll timer assumes the process keeps running between requests. On
-CPU-throttled or scale-to-zero runtimes it either doesn't fire, or it fires only
-to wake an idle instance for work nobody asked for. In `"on-demand"` mode the
-client **arms no timer**: refreshing rides on reads instead, and only once the
-snapshot is `pollSeconds` old.
+On scale-to-zero runtimes a poll timer either doesn't fire or fires only to
+wake an idle instance. In `"on-demand"` mode the client **arms no timer**:
+refreshing rides on reads instead, and only once the snapshot is `pollSeconds`
+old.
 
 ```ts
 // Either the env var above, or explicitly:
@@ -100,12 +99,10 @@ app.use(async (_req, _res, next) => {
 });
 ```
 
-- At most one conditional `GET` per `pollSeconds` per instance — usually a
-  `304`. Reads in between are served from memory.
-- Concurrent refreshes coalesce, so a burst of requests is one request to the
-  flag service.
-- Staleness is measured from the last _attempt_, so a flag service that is down
-  costs one failed request per interval, not one per read.
+- At most one conditional `GET` (usually a `304`) per `pollSeconds` per
+  instance, measured from the last _attempt_ — so a dead flag service costs
+  one failed request per interval, not one per read. Concurrent refreshes
+  coalesce; reads in between are served from memory.
 - Everything else — fail-static, last-known-good forever, never throwing,
   transition-only logging — is unchanged.
 

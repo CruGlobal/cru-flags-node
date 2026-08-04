@@ -111,9 +111,9 @@ export class CruFlags {
    * {@link CruFlags.ready} if you need the first document before deciding.
    *
    * In `"on-demand"` mode this also *triggers* a refresh when the snapshot has
-   * aged past `pollSeconds` — without awaiting it, because a synchronous
-   * predicate cannot. The answer therefore comes from the previous fetch; use
-   * `await` {@link CruFlags.refresh} first where that matters.
+   * aged past `pollSeconds`, without awaiting it — the answer comes from the
+   * previous fetch. Use `await` {@link CruFlags.refresh} first where that
+   * matters.
    */
   enabled(name: string): boolean {
     try {
@@ -158,18 +158,10 @@ export class CruFlags {
    * completed and the most recent one succeeded. Never rejects.
    *
    * A no-op while the last attempt is younger than `pollSeconds`, unless
-   * `force` is set — so it is cheap to `await` once per request. Concurrent
-   * calls (and a concurrent background poll) share the one in-flight request.
-   *
-   * This is how `"on-demand"` mode is driven when you need the current
-   * document *before* reading a flag:
-   *
-   * ```ts
-   * app.use(async (_req, _res, next) => {
-   *   await flags.refresh();
-   *   next();
-   * });
-   * ```
+   * `force` is set — so it is cheap to `await` once per request (e.g. in
+   * middleware), which is how `"on-demand"` mode is driven when the current
+   * document is needed *before* reading a flag (§4.8). Concurrent calls (and
+   * a concurrent background poll) share the one in-flight request.
    */
   async refresh(options: RefreshOptions = {}): Promise<boolean> {
     try {
@@ -433,11 +425,10 @@ function urlFromEnvironment(): string | undefined {
 
 /**
  * Read the refresh mode from the environment, so the `flags` singleton can be
- * switched over by a deployment rather than by a code change.
- *
- * An unrecognised value warns and falls back to background polling: a
- * misconfigured environment variable must not stop an app from booting. An
- * unrecognised `refreshMode` *option* is a type error instead.
+ * switched over by a deployment rather than by a code change. An unrecognised
+ * value warns and falls back to background polling — misconfiguration must
+ * not stop an app booting. (An unrecognised `refreshMode` *option* is a type
+ * error instead.)
  */
 function refreshModeFromEnvironment(): RefreshMode {
   if (typeof process === "undefined") return DEFAULT_REFRESH_MODE;

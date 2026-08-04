@@ -357,21 +357,19 @@ Everything above describes the default, `refreshMode: "background"`. With
 - There is no jitter, because there is no timer to de-phase: the arrival of
   real traffic already spreads the fleet out.
 
-Why it exists: a background timer assumes the process keeps running between
-requests. On Cloud Run, or on Lambda outside an invocation, the runtime
-throttles or freezes the instance — the timer either does not fire, or it fires
-only to wake an idle instance up for work nobody asked for, and the "flags are
-always fresh" premise quietly stops holding. Tying the refresh to real traffic
-is both honest and cheap, and it happens exactly when someone wants an answer.
+Why it exists: on Cloud Run, or on Lambda outside an invocation, the runtime
+throttles or freezes the instance — a poll timer either does not fire, or
+fires only to wake an idle instance for work nobody asked for. Tying the
+refresh to real traffic is cheap (a conditional GET, usually a `304`, once per
+interval) and happens exactly when someone wants an answer.
 
 Selecting it: the `refreshMode` option, or `CRU_FLAGS_REFRESH_MODE=on-demand`
-in the environment. The environment variable exists because the 99% path is the
-`flags` singleton, which nobody constructs — a deployment that needs on-demand
-refresh should not have to restructure its code, any more than it hand-codes
-its `CRU_FLAGS_URL`. The option wins over the environment; an unrecognised
-_environment_ value warns once and falls back to background polling, because
-misconfiguration must not stop an app booting, while an unrecognised _option_
-is a TypeScript error at the call site.
+in the environment — the variable exists so the `flags` singleton, which
+nobody constructs, can be switched by a deployment rather than a code change.
+The option wins over the environment. An unrecognised _environment_ value
+warns once and falls back to background polling, because misconfiguration must
+not stop an app booting; an unrecognised _option_ is a TypeScript error at the
+call site.
 
 ---
 
