@@ -57,6 +57,22 @@ export type FlagsHealthEvent =
 /** Health-transition handler. Must not throw (a throw is caught and ignored). */
 export type FlagsErrorHandler = (event: FlagsHealthEvent) => void;
 
+/**
+ * How the document is refreshed.
+ *
+ * - `"background"` (default) — an unref'd poll timer, every `pollSeconds`.
+ * - `"on-demand"` — no timer. The refresh rides on whatever reads a flag, and
+ *   only once the snapshot is `pollSeconds` old. For runtimes that freeze
+ *   between requests (Cloud Run, Lambda). See `docs/design.md` §4.8.
+ */
+export type RefreshMode = "background" | "on-demand";
+
+/** Options for {@link CruFlags.refresh}. */
+export interface RefreshOptions {
+  /** Fetch even if the snapshot is younger than `pollSeconds`. */
+  readonly force?: boolean;
+}
+
 /** Options for {@link CruFlags}. */
 export interface CruFlagsOptions {
   /**
@@ -68,8 +84,9 @@ export interface CruFlagsOptions {
   readonly url?: string;
 
   /**
-   * Background poll interval in seconds, jittered ±20% on every tick.
-   * Defaults to 30.
+   * Refresh interval in seconds. Defaults to 30. In `"background"` mode it is
+   * the poll period, jittered ±20% on every tick; in `"on-demand"` mode it is
+   * the minimum snapshot age before a read triggers a refetch.
    */
   readonly pollSeconds?: number;
 
@@ -80,4 +97,11 @@ export interface CruFlagsOptions {
    * Called on health transitions only. Defaults to a `console.warn` handler.
    */
   readonly onError?: FlagsErrorHandler;
+
+  /**
+   * Background polling or on-demand refresh. Defaults to
+   * `process.env.CRU_FLAGS_REFRESH_MODE`, read when the client starts, and to
+   * `"background"` when that is unset.
+   */
+  readonly refreshMode?: RefreshMode;
 }

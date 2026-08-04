@@ -28,9 +28,16 @@ Drift between the design doc and the code is a bug, and the doc wins.
 Each of these looks like it could be tidied up, and each one is load-bearing.
 The rationale is in `docs/design.md`; the short version:
 
-- **`enabled()` never throws and never does I/O.** It is a hot-path
-  predicate. Unknown flag, no document, malformed entry -> `false`. No
-  coercion: the check is literally `Flags[name]?.Enabled === true`.
+- **`enabled()` never throws, and never blocks.** It is a hot-path predicate.
+  Unknown flag, no document, malformed entry -> `false`. No coercion: the check
+  is literally `Flags[name]?.Enabled === true`.
+- **`enabled()` does no I/O in background mode.** In `refreshMode: "on-demand"`
+  (§4.8) it may _trigger_ a stale refresh, but never awaits one — a sync
+  predicate that blocks on the network is worse than a stale boolean. Do not
+  make on-demand reads await, and do not give background reads a fetch.
+- **On-demand staleness is anchored on the last _attempt_,** not the last
+  success, so a dead flag service costs one request per interval rather than
+  one per read. Concurrent refreshes coalesce onto `#inFlight`.
 - **Fail-static with no expiry.** Last-known-good flags are served forever
   through any outage. Adding a TTL would turn a flag-service outage into a
   fleet-wide unannounced flag flip hours later. (§4.5)
@@ -46,8 +53,11 @@ The rationale is in `docs/design.md`; the short version:
 - **The poll timer is `unref()`'d.** The client must never keep a process
   alive. A library that hangs someone's CLI gets ripped out. (§4.4)
 - **Nothing happens at import.** First `enabled()`/`ready()` call starts the
-  client — so `process.env` set after import still works, and importing the
-  module in a test never opens a socket. (§4.1)
+  client — so `process.env` set after import still works (`CRU_FLAGS_URL`,
+  `CRU_FLAGS_REFRESH_MODE`), and importing the module in a test never opens a
+  socket. (§4.1)
+- **Misconfiguration from the environment warns; from code it is a type
+  error.** A bad `CRU_FLAGS_REFRESH_MODE` warns once and keeps polling.
 - **Unset `CRU_FLAGS_URL` -> inert and silent.** No timers, no fetch, no
   warning. Unconfigured is a normal state (local dev, CI, unit tests). (§4.2)
 - **Snapshots are deep-frozen and replaced wholesale.** A 200 installs a new

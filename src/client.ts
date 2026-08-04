@@ -5,13 +5,20 @@ import type {
   FlagsDocument,
   FlagsErrorHandler,
   FlagsHealthEvent,
+  RefreshMode,
+  RefreshOptions,
 } from "./types.js";
 
 /** Environment variable holding the flag document URL. */
 export const URL_ENV_VAR = "CRU_FLAGS_URL";
 
+/** Environment variable selecting `"background"` or `"on-demand"` refresh. */
+export const REFRESH_MODE_ENV_VAR = "CRU_FLAGS_REFRESH_MODE";
+
 const DEFAULT_POLL_SECONDS = 30;
 const DEFAULT_FETCH_TIMEOUT_MS = 2000;
+const DEFAULT_REFRESH_MODE: RefreshMode = "background";
+const REFRESH_MODES: readonly RefreshMode[] = ["background", "on-demand"];
 
 /** ±20% — see `docs/design.md` §4.3 (why jitter). */
 const JITTER = 0.2;
@@ -39,12 +46,22 @@ const SNIPPET_LIMIT = 200;
  */
 export class CruFlags {
   readonly #configuredUrl: string | undefined;
+  readonly #configuredRefreshMode: RefreshMode | undefined;
   readonly #pollSeconds: number;
   readonly #fetchTimeoutMs: number;
   readonly #onError: FlagsErrorHandler;
 
   /** Resolved at start; `null` means inert (no URL configured). */
   #url: string | null = null;
+
+  /** Resolved at start, from the option or the environment. */
+  #refreshMode: RefreshMode = DEFAULT_REFRESH_MODE;
+
+  /** When the last fetch *attempt* settled — the staleness anchor. */
+  #lastAttemptMs: number | null = null;
+
+  /** The fetch in flight, so concurrent refreshes coalesce onto one request. */
+  #inFlight: Promise<void> | null = null;
 
   /** Last-known-good document, or `null` before the first success / after 404. */
   #document: FlagsDocument | null = null;
@@ -65,6 +82,7 @@ export class CruFlags {
 
   constructor(options: CruFlagsOptions = {}) {
     this.#configuredUrl = normalizeUrl(options.url);
+    this.#configuredRefreshMode = options.refreshMode;
     this.#pollSeconds = positive(options.pollSeconds, DEFAULT_POLL_SECONDS);
     this.#fetchTimeoutMs = positive(
       options.fetchTimeoutMs,
@@ -89,12 +107,18 @@ export class CruFlags {
    * client all yield `false`. The value is exactly
    * `Flags[name]?.Enabled === true` — nothing is coerced.
    *
-   * The first call starts the background poll but does not wait for it; use
+   * The first call starts the client but does not wait for it; use
    * {@link CruFlags.ready} if you need the first document before deciding.
+   *
+   * In `"on-demand"` mode this also *triggers* a refresh when the snapshot has
+   * aged past `pollSeconds`, without awaiting it — the answer comes from the
+   * previous fetch. Use `await` {@link CruFlags.refresh} first where that
+   * matters.
    */
   enabled(name: string): boolean {
     try {
       this.#start();
+      this.#refreshOnRead();
       return this.#document?.Flags[name]?.Enabled === true;
     } catch {
       // `enabled()` is on the hot path of applications that may be mid-outage.
@@ -125,11 +149,36 @@ export class CruFlags {
    */
   snapshot(): FlagsDocument | null {
     this.#start();
+    this.#refreshOnRead();
     return this.#document;
   }
 
   /**
-   * Stop polling permanently and release the timer.
+   * Refresh now, and resolve to whether the snapshot is fresh: an attempt has
+   * completed and the most recent one succeeded. Never rejects.
+   *
+   * A no-op while the last attempt is younger than `pollSeconds`, unless
+   * `force` is set — so it is cheap to `await` once per request (e.g. in
+   * middleware), which is how `"on-demand"` mode is driven when the current
+   * document is needed *before* reading a flag (§4.8). Concurrent calls (and
+   * a concurrent background poll) share the one in-flight request.
+   */
+  async refresh(options: RefreshOptions = {}): Promise<boolean> {
+    try {
+      this.#start();
+      // An inert or closed client will never have fresh flags, and saying so
+      // is more useful than reporting on a snapshot that can no longer move.
+      if (this.#url === null || this.#closed) return false;
+      await this.#refreshIfStale(options.force === true);
+      return this.#lastAttemptMs !== null && this.#healthy;
+    } catch {
+      // `#fetchOnce` is written not to reject; this is the belt to its braces.
+      return false;
+    }
+  }
+
+  /**
+   * Stop refreshing permanently and release the timer.
    *
    * Optional in long-lived processes — the poll timer is `unref()`'d, so it
    * never keeps the event loop alive — but useful in tests and short-lived
@@ -153,6 +202,9 @@ export class CruFlags {
     if (this.#started || this.#closed) return;
     this.#started = true;
 
+    this.#refreshMode =
+      this.#configuredRefreshMode ?? refreshModeFromEnvironment();
+
     const url = this.#configuredUrl ?? urlFromEnvironment();
     if (url === undefined) {
       // Inert: no URL, so no timer, no request and — deliberately — no
@@ -165,7 +217,7 @@ export class CruFlags {
     this.#run();
   }
 
-  /** Run one poll tick, then arm the next one. Never rejects. */
+  /** Run one refresh, then (in background mode) arm the next one. */
   #run(): void {
     void this.#tick().catch(() => {
       // `#tick` is written not to reject. If it ever does, keep the loop
@@ -176,11 +228,60 @@ export class CruFlags {
   }
 
   async #tick(): Promise<void> {
-    const url = this.#url;
-    if (url === null || this.#closed) return;
-    await this.#fetchOnce(url);
+    if (this.#url === null || this.#closed) return;
+    // Forced: a poll tick fetches whether or not a manual refresh just did.
+    await this.#refreshIfStale(true);
     this.#resolveReady();
     this.#schedule();
+  }
+
+  /**
+   * Trigger, but do not await, an on-demand refresh from a synchronous read.
+   * A no-op in background mode, where the timer owns refreshing.
+   */
+  #refreshOnRead(): void {
+    if (this.#refreshMode !== "on-demand") return;
+    void this.#refreshIfStale(false);
+  }
+
+  /**
+   * Fetch unless the snapshot is fresh enough, coalescing onto any request
+   * already in flight. Never rejects.
+   */
+  #refreshIfStale(force: boolean): Promise<void> {
+    // Coalesce first, and regardless of `force`: a fetch that is already on
+    // the wire is the fetch every concurrent caller wants. A burst of N
+    // requests is one request to the flag service.
+    const inFlight = this.#inFlight;
+    if (inFlight !== null) return inFlight;
+
+    if (!force && !this.#isStale()) return Promise.resolve();
+
+    const url = this.#url;
+    if (url === null || this.#closed) return Promise.resolve();
+
+    const attempt = this.#fetchOnce(url).then(
+      () => {
+        this.#inFlight = null;
+        this.#resolveReady();
+      },
+      () => {
+        this.#inFlight = null;
+        this.#resolveReady();
+      },
+    );
+    this.#inFlight = attempt;
+    return attempt;
+  }
+
+  /**
+   * Is the last fetch *attempt* older than `pollSeconds`? Anchoring on the
+   * attempt rather than the last success is what keeps a dead flag service to
+   * one request per interval instead of one per read.
+   */
+  #isStale(): boolean {
+    const last = this.#lastAttemptMs;
+    return last === null || Date.now() - last >= this.#pollSeconds * 1000;
   }
 
   /**
@@ -190,6 +291,9 @@ export class CruFlags {
    */
   #schedule(): void {
     if (this.#closed || this.#url === null) return;
+    // On-demand mode owns no timer at all: that is the whole point of it on a
+    // runtime that freezes between requests (§4.8).
+    if (this.#refreshMode === "on-demand") return;
     this.#clearTimer();
 
     const jitter = 1 - JITTER + Math.random() * JITTER * 2;
@@ -275,6 +379,7 @@ export class CruFlags {
       this.#fail(url, toFlagsError(error));
     } finally {
       clearTimeout(timeout);
+      this.#lastAttemptMs = Date.now();
     }
   }
 
@@ -316,6 +421,25 @@ function normalizeUrl(url: string | undefined): string | undefined {
 function urlFromEnvironment(): string | undefined {
   if (typeof process === "undefined") return undefined;
   return normalizeUrl(process.env[URL_ENV_VAR]);
+}
+
+/**
+ * Read the refresh mode from the environment, so the `flags` singleton can be
+ * switched over by a deployment rather than by a code change. An unrecognised
+ * value warns and falls back to background polling — misconfiguration must
+ * not stop an app booting. (An unrecognised `refreshMode` *option* is a type
+ * error instead.)
+ */
+function refreshModeFromEnvironment(): RefreshMode {
+  if (typeof process === "undefined") return DEFAULT_REFRESH_MODE;
+  const raw = process.env[REFRESH_MODE_ENV_VAR]?.trim();
+  if (raw === undefined || raw === "") return DEFAULT_REFRESH_MODE;
+  const mode = raw.toLowerCase() as RefreshMode;
+  if (REFRESH_MODES.includes(mode)) return mode;
+  console.warn(
+    `[@cruglobal/flags] ${REFRESH_MODE_ENV_VAR} must be one of ${REFRESH_MODES.join(" | ")}; ignoring ${JSON.stringify(raw)} and polling in the background`,
+  );
+  return DEFAULT_REFRESH_MODE;
 }
 
 function positive(value: number | undefined, fallback: number): number {
