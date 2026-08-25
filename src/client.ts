@@ -377,7 +377,17 @@ export class CruFlags {
         );
       }
 
-      const document = parseDocument(await response.text());
+      const { text, truncated } = await readCappedBody(response);
+      if (truncated) {
+        // Only a 200 body is the document (§4.9): a truncated one must never
+        // be parsed, so this is the tick's failure rather than a size-only
+        // footnote on some other outcome.
+        throw new FlagsError(
+          "parse",
+          `flag fetch body exceeds ${MAX_BODY_BYTES} bytes`,
+        );
+      }
+      const document = parseDocument(text);
 
       // Order matters: the `ETag` is stored only alongside a document we
       // actually parsed. Storing it for a body we rejected would make every
@@ -467,10 +477,54 @@ function unrefTimer(timer: ReturnType<typeof setTimeout>): void {
   handle.unref?.();
 }
 
+/**
+ * Read a response body up to `MAX_BODY_BYTES`, streamed chunk by chunk
+ * rather than buffered whole by `fetch`'s own `.text()` — the read stops,
+ * and the underlying request is cancelled, the instant the cap is passed, so
+ * a hostile or misconfigured endpoint serving gigabytes never reaches the
+ * heap whole (`docs/design.md` §4.9). The `AbortController` deadline in
+ * `#fetchOnce` still bounds this: it's the same `fetch` call's stream, so a
+ * slow trickle past the cap still can't outlast `fetchTimeoutMs`.
+ *
+ * `truncated` tells the caller an aborted read from a complete one apart —
+ * what that means for the outcome is the caller's call (§4.9: only a `200`
+ * turns it into a failure).
+ */
+async function readCappedBody(
+  response: Response,
+): Promise<{ text: string; truncated: boolean }> {
+  // `Response.body`'s ambient type is `ReadableStream` with no type
+  // argument (defaulting to `any`) — undici's own typings, not something a
+  // narrower `lib` here can fix. The body of a `fetch` response is bytes.
+  const reader = response.body?.getReader() as
+    ReadableStreamDefaultReader<Uint8Array> | undefined;
+  if (!reader) return { text: "", truncated: false };
+
+  const decoder = new TextDecoder();
+  let text = "";
+  let total = 0;
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return { text: text + decoder.decode(), truncated: false };
+      total += value.byteLength;
+      text += decoder.decode(value, { stream: true });
+      if (total > MAX_BODY_BYTES) return { text, truncated: true };
+    }
+  } finally {
+    // Mirrors cru-flags-ruby unwinding out of Net::HTTP.start on the same
+    // cap: tear the connection down rather than leave a cap-busting response
+    // draining in the background.
+    await reader.cancel().catch(() => undefined);
+  }
+}
+
 /** Drain an error response and keep a short excerpt for the error message. */
 async function readSnippet(response: Response): Promise<string> {
   try {
-    const body = (await response.text()).trim();
+    const { text } = await readCappedBody(response);
+    const body = text.trim();
     if (body === "") return "";
     const excerpt =
       body.length > SNIPPET_LIMIT ? `${body.slice(0, SNIPPET_LIMIT)}…` : body;

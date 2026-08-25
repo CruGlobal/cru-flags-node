@@ -324,7 +324,9 @@ the property most useful when someone is debugging: it can be logged.
 expiry the controller aborts with a `FlagsError { code: "timeout" }`, which is
 what `fetch` then rejects with. 2s is chosen against the deployment reality:
 the poll is background work, and a request that hasn't answered in 2s will not
-answer usefully before the next tick anyway.
+answer usefully before the next tick anyway. The same `AbortController` also
+bounds reading the response body (§4.9): a body that trickles in slowly cannot
+outlast the deadline either.
 
 ### 4.8 On-demand refresh (`refreshMode: "on-demand"`)
 
@@ -370,6 +372,28 @@ The option wins over the environment. An unrecognised _environment_ value
 warns once and falls back to background polling, because misconfiguration must
 not stop an app booting; an unrecognised _option_ is a TypeScript error at the
 call site.
+
+### 4.9 Response body cap
+
+Every response body read from the network — the document on a `200`, and the
+excerpt read for a non-2xx status (§5) — is capped at 1 MiB (`MAX_BODY_BYTES`),
+enforced **while the body streams** rather than after `fetch` has already
+buffered it whole: the body's `ReadableStream` is read chunk by chunk with a
+running byte count, and the reader is cancelled — which tears down the
+underlying request — the moment the cap is passed. A hostile or misconfigured
+endpoint serving gigabytes therefore never reaches the heap whole.
+
+Only a `200` that overruns the cap fails the tick: that body _is_ the
+document, and a truncated document must never be parsed (`FlagsError { code:
+"parse" }`, fail-static as usual, §4.5). Every other status already fails, or
+doesn't, on its own terms (§2.1) — the cap there only bounds how much a
+`SNIPPET_LIMIT`-sized excerpt can cost to produce, and never relabels the
+outcome. A `304` or `404` reads no body at all, so neither is affected.
+
+Mirrors the equivalent fix in `cru-flags-ruby` (`docs/design.md` §8): the same
+1 MiB cap, the same 200-vs-everything-else failure split, and the same
+streamed-rather-than-buffered enforcement — the sibling clients share this
+part of the contract.
 
 ---
 
