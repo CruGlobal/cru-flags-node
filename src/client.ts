@@ -27,6 +27,16 @@ const JITTER = 0.2;
 const SNIPPET_LIMIT = 200;
 
 /**
+ * Cap on any response body read from the network — the document on a `200`,
+ * and the excerpt read for a non-2xx status alike. Mirrors the cap
+ * `cru-flags-ruby` enforces (`docs/design.md` §4.9): large enough for any
+ * real flag document, small enough that a hostile or misconfigured endpoint
+ * serving gigabytes cannot exhaust memory on a single poll tick. Exported so
+ * tests don't hardcode a copy that can drift.
+ */
+export const MAX_BODY_BYTES = 1_048_576;
+
+/**
  * A client for one flag document.
  *
  * Most applications use the pre-built {@link flags} singleton. Construct this

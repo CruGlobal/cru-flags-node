@@ -156,6 +156,67 @@ export function serveHang(): FlagHandler {
   };
 }
 
+/**
+ * Stream `totalBytes` (deliberately more than the client's body cap) at
+ * `status`, writing in small chunks and honouring backpressure. `writtenBytes`
+ * reports how much actually made it onto the wire before the connection died
+ * underneath the server — the only way to tell an aborted, streamed read from
+ * one `fetch` buffered in full before objecting (`docs/design.md` §4.9).
+ */
+export function serveOversized(
+  status: number,
+  totalBytes: number,
+): { handler: FlagHandler; writtenBytes: () => number } {
+  let written = 0;
+  const chunk = Buffer.alloc(64 * 1024, "x");
+
+  const handler: FlagHandler = async (request, response) => {
+    // A client that aborts mid-stream turns further writes into ECONNRESET /
+    // EPIPE; that is the point of this helper, not a test failure. One
+    // persistent listener per event (rather than one per backpressure wait)
+    // so a long stall before the abort lands doesn't trip Node's
+    // max-listeners warning.
+    let closed = false;
+    let signalClosed = (): void => {
+      closed = true;
+    };
+    const closedSignal = new Promise<void>((resolve) => {
+      signalClosed = () => {
+        closed = true;
+        resolve();
+      };
+    });
+    response.on("error", signalClosed);
+    response.on("close", signalClosed);
+    request.socket.on("error", () => undefined);
+
+    response.writeHead(status, {
+      "content-type": "application/json",
+      "content-length": String(totalBytes),
+    });
+
+    try {
+      while (written < totalBytes && !closed) {
+        const size = Math.min(chunk.length, totalBytes - written);
+        const piece = size === chunk.length ? chunk : chunk.subarray(0, size);
+        const ok = response.write(piece);
+        written += size;
+        if (!ok && !closed) {
+          await Promise.race([
+            new Promise<void>((resolve) => response.once("drain", resolve)),
+            closedSignal,
+          ]);
+        }
+      }
+      if (!closed) response.end();
+    } catch {
+      // The client hung up before the full body went out — expected.
+    }
+  };
+
+  return { handler, writtenBytes: () => written };
+}
+
 export function header(
   request: IncomingMessage,
   name: string,

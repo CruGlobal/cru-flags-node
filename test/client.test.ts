@@ -3,7 +3,7 @@
  * Every test drives the client through a real socket (see helpers/server.ts).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CruFlags } from "../src/client.js";
+import { CruFlags, MAX_BODY_BYTES } from "../src/client.js";
 import type { FlagsError } from "../src/errors.js";
 import type { FlagsHealthEvent } from "../src/types.js";
 import {
@@ -12,6 +12,7 @@ import {
   serveBody,
   serveDocument,
   serveHang,
+  serveOversized,
   serveStatus,
   sleep,
   type FlagHandler,
@@ -383,6 +384,79 @@ describe("bad responses", () => {
     await client.ready();
 
     expect(failure(events[0]).code).toBe("network");
+  });
+});
+
+describe("response body cap", () => {
+  // Deliberately several times MAX_BODY_BYTES: proves the read was aborted,
+  // not merely slow. If the client buffered the whole thing before checking
+  // the size, `writtenBytes()` would equal `declared`.
+  const declared = MAX_BODY_BYTES * 8;
+
+  it("fails a 200 whose body exceeds the cap, without buffering it whole", async () => {
+    const { handler, writtenBytes } = serveOversized(200, declared);
+    server.serve(handler);
+    const client = makeClient();
+
+    await client.ready();
+
+    expect(client.snapshot()).toBeNull();
+    expect(events).toHaveLength(1);
+    const error = failure(events[0]);
+    expect(error.code).toBe("parse");
+    expect(error.message).toContain(`${MAX_BODY_BYTES}`);
+    expect(writtenBytes()).toBeLessThan(declared);
+  });
+
+  it("keeps the last-known-good document (fail-static) after an oversized 200", async () => {
+    const client = makeClient({ pollSeconds: 0.05 });
+    await client.ready();
+    expect(client.enabled("alpha")).toBe(true);
+
+    const { handler } = serveOversized(200, declared);
+    await nextPoll(handler);
+    await until(() => events.length > 0, "the cap failure");
+
+    expect(client.enabled("alpha")).toBe(true);
+    expect(kinds()).toEqual(["failing"]);
+  });
+
+  it("does not store an ETag for a body it never finished reading", async () => {
+    const client = makeClient({ pollSeconds: 0.05 });
+    await client.ready();
+    expect(client.enabled("alpha")).toBe(true);
+
+    await nextPoll(serveOversized(200, declared).handler);
+    await until(() => events.length > 0, "the cap failure");
+    await nextPoll();
+
+    expect(lastRequest().ifNoneMatch).toBe('"1"');
+  });
+
+  it("preserves a non-200 status's own outcome when its body exceeds the cap", async () => {
+    const { handler, writtenBytes } = serveOversized(500, declared);
+    server.serve(handler);
+    const client = makeClient();
+
+    await client.ready();
+
+    const error = failure(events[0]);
+    expect(error.code).toBe("http");
+    expect(error.status).toBe(500);
+    expect(writtenBytes()).toBeLessThan(declared);
+  });
+
+  it("recovers once the service serves a body under the cap again", async () => {
+    const { handler } = serveOversized(200, declared);
+    server.serve(handler);
+    const client = makeClient({ pollSeconds: 0.05 });
+    await client.ready();
+    expect(kinds()).toEqual(["failing"]);
+
+    await nextPoll(serveDocument(SAMPLE_DOCUMENT));
+    await until(() => client.enabled("alpha"), "recovery");
+
+    expect(kinds()).toEqual(["failing", "recovered"]);
   });
 });
 
